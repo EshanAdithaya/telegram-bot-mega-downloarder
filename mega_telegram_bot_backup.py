@@ -93,42 +93,55 @@ Ready to receive your MEGA link! 📁
             # Login to MEGA (anonymous)
             m = self.mega.login()
             
-            # Import the public folder
-            await status_msg.edit_text("📂 Importing public folder...")
+            # Get folder contents
+            await status_msg.edit_text("📋 Getting folder contents...")
             
-            try:
-                # Import the folder to our temporary account
-                folder_data = m.import_public_url(mega_url)
-                
-                # Get all files after importing
-                await status_msg.edit_text("📋 Getting folder contents...")
-                files = m.get_files()
-                
-                if not files:
-                    await status_msg.edit_text("❌ No files found in the folder.")
-                    return
-                
-                # Filter media files
-                media_files = self.filter_media_files(files)
-                
-            except Exception as e:
-                logger.error(f"Error importing folder: {e}")
-                # Try alternative method - direct URL parsing
-                await status_msg.edit_text("🔄 Trying alternative access method...")
-                
+            # Extract folder ID from URL
+            import re
+            folder_pattern = r'#F!([a-zA-Z0-9_-]+)!([a-zA-Z0-9_-]+)'
+            match = re.search(folder_pattern, mega_url)
+            
+            if not match:
+                await status_msg.edit_text("❌ Invalid MEGA folder URL format.")
+                return
+            
+            folder_id = match.group(1)
+            folder_key = match.group(2)
+            
+            # Get all files from the account
+            files = m.get_files()
+            
+            # Find files in the specific folder
+            folder_files = {}
+            for file_id, file_data in files.items():
+                if isinstance(file_data, dict) and 'a' in file_data:
+                    # Check if this file belongs to our folder
+                    if 'p' in file_data and file_data['p'] == folder_id:
+                        folder_files[file_id] = file_data
+            
+            if not folder_files:
+                # Try alternative method: import folder first
                 try:
-                    # Get files from URL directly
-                    files = m.get_files_in_node(mega_url)
-                    if not files:
-                        await status_msg.edit_text("❌ Could not access the MEGA folder. Please ensure it's a public folder.")
-                        return
+                    await status_msg.edit_text("📂 Importing folder...")
+                    m.import_public_url(mega_url)
+                    files = m.get_files()
                     
-                    media_files = self.filter_media_files(files)
-                    
-                except Exception as e2:
-                    logger.error(f"Alternative method failed: {e2}")
-                    await status_msg.edit_text("❌ Could not access the MEGA folder. Please ensure it's a public folder with proper permissions.")
+                    # Look for recently imported files
+                    for file_id, file_data in files.items():
+                        if isinstance(file_data, dict) and 'a' in file_data:
+                            folder_files[file_id] = file_data
+                            
+                except Exception as e:
+                    logger.error(f"Error importing folder: {e}")
+                    await status_msg.edit_text("❌ Could not access the MEGA folder. Please ensure it's a public folder.")
                     return
+            
+            if not folder_files:
+                await status_msg.edit_text("❌ No files found in the folder or folder is private.")
+                return
+            
+            # Filter media files
+            media_files = self.filter_media_files(folder_files)
             
             if not media_files:
                 await status_msg.edit_text("❌ No supported media files found in the folder.")
@@ -142,13 +155,8 @@ Ready to receive your MEGA link! 📁
             
             for i, (file_id, file_info) in enumerate(media_files.items(), 1):
                 try:
-                    # Get filename and size
-                    if 'a' in file_info and 'n' in file_info['a']:
-                        filename = file_info['a']['n']
-                    else:
-                        filename = f"file_{i}"
-                    
-                    file_size = file_info.get('s', 0)
+                    filename = file_info['a']['n']  # Original filename
+                    file_size = file_info['s']
                     
                     # Update progress
                     await status_msg.edit_text(
@@ -157,48 +165,27 @@ Ready to receive your MEGA link! 📁
                     )
                     
                     # Download file to temp directory
-                    try:
-                        downloaded_path = m.download(file_id, self.temp_dir)
-                        
-                        # Find the downloaded file
-                        if isinstance(downloaded_path, str) and os.path.exists(downloaded_path):
-                            local_path = downloaded_path
-                        else:
-                            # Look for the file in temp directory
-                            potential_path = os.path.join(self.temp_dir, filename)
-                            if os.path.exists(potential_path):
-                                local_path = potential_path
-                            else:
-                                # Find any file that was just created
-                                temp_files = [f for f in os.listdir(self.temp_dir) if os.path.isfile(os.path.join(self.temp_dir, f))]
-                                if temp_files:
-                                    local_path = os.path.join(self.temp_dir, temp_files[-1])  # Get the most recent file
-                                else:
-                                    raise Exception("Downloaded file not found")
-                        
-                        # Upload to Telegram group
-                        await status_msg.edit_text(
-                            f"📤 Uploading ({i}/{len(media_files)}): {filename}"
-                        )
-                        
-                        success = await self.upload_to_telegram(local_path, filename)
-                        
-                        if success:
-                            uploaded_count += 1
-                        else:
-                            failed_count += 1
-                        
-                        # Clean up local file
-                        if os.path.exists(local_path):
-                            os.remove(local_path)
-                            
-                    except Exception as download_error:
-                        logger.error(f"Error downloading {filename}: {download_error}")
+                    local_path = os.path.join(self.temp_dir, filename)
+                    m.download(file_id, self.temp_dir)
+                    
+                    # Upload to Telegram group
+                    await status_msg.edit_text(
+                        f"📤 Uploading ({i}/{len(media_files)}): {filename}"
+                    )
+                    
+                    success = await self.upload_to_telegram(local_path, filename)
+                    
+                    if success:
+                        uploaded_count += 1
+                    else:
                         failed_count += 1
-                        continue
+                    
+                    # Clean up local file
+                    if os.path.exists(local_path):
+                        os.remove(local_path)
                         
                 except Exception as e:
-                    logger.error(f"Error processing file: {e}")
+                    logger.error(f"Error processing file {filename}: {e}")
                     failed_count += 1
                     continue
             
@@ -226,7 +213,7 @@ Ready to receive your MEGA link! 📁
         
         media_files = {}
         for file_id, file_info in files.items():
-            if isinstance(file_info, dict) and 'a' in file_info and 'n' in file_info['a']:
+            if 'a' in file_info and 'n' in file_info['a']:
                 filename = file_info['a']['n'].lower()
                 if any(filename.endswith(ext) for ext in media_extensions):
                     media_files[file_id] = file_info
